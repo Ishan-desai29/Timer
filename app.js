@@ -1,7 +1,8 @@
 /* =========================================================
-   T-MINUS · split-flap countdown
+   Flip Timer
+   A phone-style timer whose countdown runs on split-flap cards.
    - Real split-flap mechanics: every card steps through its drum
-   - All sound is synthesized live with the Web Audio API
+   - The click is synthesized live with the Web Audio API
    ========================================================= */
 (() => {
   'use strict';
@@ -9,42 +10,37 @@
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-  const pad = (n, w) => String(n).padStart(w, '0');
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
 
   /* ---------------------------------------------------------
      Settings + persistence
      --------------------------------------------------------- */
-  const SETTINGS_KEY = 'tminus.settings.v1';
-  const STATE_KEY = 'tminus.state.v1';
+  const SETTINGS_KEY = 'fliptimer.settings.v1';
+  const STATE_KEY = 'fliptimer.state.v1';
+  const MAX_SEC = 23 * 3600 + 59 * 60 + 59;
 
   const DEFAULTS = {
-    label: 'DOOMSDAY',
-    wallpaper: 'bunker',
-    wallUrl: '',
-    wallDim: 45,
+    label: '',
+    wallpaper: 'black',
+    wallDim: 0,
     wallBlur: 0,
-    accent: 'doom',
-    volMaster: 80,
     volClick: 85,
     echo: 55,
+    endSound: 'rattle',      // rattle | once | silent
     ignoreSilent: false,
-    shake: true,
-    crt: true,
-    muted: false,
-    mode: 'timer',
-    duration: 300,          // seconds
-    target: null,           // ISO string for date mode
+    duration: 300,           // seconds, last value on the wheels
+    recents: [60, 300, 600, 1500],
   };
 
   const readJSON = (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } };
   const S = { ...DEFAULTS, ...(readJSON(SETTINGS_KEY) || {}) };
   const saveSettings = () => { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(S)); } catch {} };
 
-  // Small IndexedDB wrapper for big blobs (wallpaper image, custom clack sound)
+  // IndexedDB for big blobs (wallpaper photo, custom click sound)
   const idb = (() => {
     let dbp;
     const open = () => dbp || (dbp = new Promise((res, rej) => {
-      const r = indexedDB.open('tminus', 1);
+      const r = indexedDB.open('fliptimer', 1);
       r.onupgradeneeded = () => r.result.createObjectStore('blobs');
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
@@ -66,10 +62,10 @@
   })();
 
   /* ---------------------------------------------------------
-     Sound engine (all synthesized)
+     Sound: the flap click, with a little room echo
      --------------------------------------------------------- */
   const Snd = (() => {
-    let ctx = null, master, clickBus, verbSend, echoSend, noise;
+    let ctx = null, clickBus, verbSend, echoSend, noise;
     let customBuf = null, pendingCustom = null;
     const recent = [];
 
@@ -92,19 +88,18 @@
 
       const comp = ctx.createDynamicsCompressor();
       comp.threshold.value = -12; comp.ratio.value = 5; comp.attack.value = 0.003; comp.release.value = 0.25;
-      master = ctx.createGain();
-      master.connect(comp).connect(ctx.destination);
+      comp.connect(ctx.destination);
 
       clickBus = ctx.createGain();
-      clickBus.connect(master);
+      clickBus.connect(comp);
 
-      // Room: a concrete space the clack rings out in
+      // Room
       const verb = ctx.createConvolver();
       verb.buffer = makeIR(2.4, 3);
       verbSend = ctx.createGain();
-      clickBus.connect(verbSend).connect(verb).connect(master);
+      clickBus.connect(verbSend).connect(verb).connect(comp);
 
-      // Echo: a soft slapback off the far wall, darker on every repeat
+      // Echo: soft slapback, darker on every repeat
       const delay = ctx.createDelay(1);
       delay.delayTime.value = 0.13;
       const fb = ctx.createGain(); fb.gain.value = 0.28;
@@ -112,7 +107,7 @@
       echoSend = ctx.createGain();
       clickBus.connect(echoSend).connect(delay);
       delay.connect(tone).connect(fb).connect(delay);
-      tone.connect(master);
+      tone.connect(comp);
 
       noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
       const nd = noise.getChannelData(0);
@@ -122,7 +117,7 @@
       if (pendingCustom) { const p = pendingCustom; pendingCustom = null; loadCustom(p); }
     }
 
-    // iPhone: let the clicks play even with the silent switch on, if asked to
+    // iPhone: optionally keep playing with the silent switch on
     function applySession() {
       try { if (navigator.audioSession) navigator.audioSession.type = S.ignoreSilent ? 'playback' : 'auto'; } catch {}
     }
@@ -130,9 +125,7 @@
     function applyVolumes() {
       applySession();
       if (!ctx) return;
-      const t = ctx.currentTime;
-      const e = S.echo / 100;
-      master.gain.setTargetAtTime(S.muted ? 0 : (S.volMaster / 100), t, 0.05);
+      const t = ctx.currentTime, e = S.echo / 100;
       clickBus.gain.setTargetAtTime(S.volClick / 100, t, 0.05);
       verbSend.gain.setTargetAtTime(e * 0.9, t, 0.05);
       echoSend.gain.setTargetAtTime(e * 0.45, t, 0.05);
@@ -155,11 +148,10 @@
       s.start(t, Math.random() * 1.8, dur + 0.05);
     }
 
-    // One flap slapping down: release tick + card slap + housing thunk
+    // One flap slapping down: release tick + card slap + body thunk
     function click(intensity = 1) {
-      if (!ctx || ctx.state !== 'running') return;
+      if (!ctx || ctx.state !== 'running' || S.volClick === 0) return;
       const now = ctx.currentTime;
-      // keep huge cascades from stacking into mush
       while (recent.length && now - recent[0] > 0.012) recent.shift();
       if (recent.length >= 3) return;
       recent.push(now);
@@ -199,20 +191,16 @@
       catch { customBuf = null; return false; }
     }
 
-    return {
-      init, click, applyVolumes, loadCustom,
-      get ready() { return !!ctx && ctx.state === 'running'; },
-    };
+    return { init, click, applyVolumes, loadCustom };
   })();
 
   /* ---------------------------------------------------------
-     Split-flap unit
-     Each card has a drum of characters it can only rotate
-     forward through, exactly like the real hardware. Drums
-     are ordered downward so a countdown is one flip per tick.
+     Split-flap card
+     Each card sits on a drum it can only turn forward through.
+     Drums run downward, so a countdown is one flip per tick.
      --------------------------------------------------------- */
-  const FAST = 72;      // ms per card while spinning to a far value
-  const NORMAL = 300;   // ms for a single deliberate flip
+  const FAST = 72;
+  const NORMAL = 300;
 
   class Flap {
     constructor(chars, initial = '0') {
@@ -245,13 +233,11 @@
       const L = this.chars.length;
       return (this.chars.indexOf(this.target) - this.chars.indexOf(this.cur) + L) % L;
     }
-
     set(ch) {
       if (!this.chars.includes(ch)) return;
       this.target = ch;
       if (!this.busy) this.run();
     }
-
     spin() { this.extra = this.chars.length; if (!this.busy) this.run(); }
 
     async run() {
@@ -260,13 +246,13 @@
         const left = this.distance() + this.extra;
         if (this.extra > 0) this.extra--;
         const nxt = this.next(this.cur);
-        if (document.hidden) { this.snap(nxt); continue; }
+        if (document.hidden) { this.snap(); continue; }
         await this.flipTo(nxt, left > 1 ? FAST + Math.random() * 18 : NORMAL);
       }
       this.busy = false;
     }
 
-    snap(ch) {
+    snap() {
       this.cur = this.target;
       this.extra = 0;
       this.top.textContent = this.bot.textContent = this.cur;
@@ -300,7 +286,6 @@
             { duration: dur, easing: 'linear' }),
         ];
 
-        // The clack lands when the leaf hits the stop
         const clackAt = half + fall * 0.62;
         const loud = dur >= NORMAL ? 1 : 0.62;
         const tid = setTimeout(() => Snd.click(loud), clackAt);
@@ -311,153 +296,100 @@
           clearTimeout(tid);
           this.bot.textContent = nxt;
           this.cur = nxt;
-          this.el.classList.remove('flipping');
+          this.el.classList.toggle('flipping', false);
           anims.forEach((a) => a.cancel());
           resolve();
         };
         anims[1].finished.then(done, done);
-        setTimeout(done, dur + 120); // safety net when the tab is throttled
+        setTimeout(done, dur + 120); // safety net for throttled tabs
       });
     }
   }
 
   /* ---------------------------------------------------------
-     Display
+     Flap display (lives inside the ring)
      --------------------------------------------------------- */
   const DIG = '9876543210';
   const SIX = '543210';
   const TWO = '210';
 
-  const LAYOUTS = {
-    timer: [
-      { key: 'h', label: 'HOURS', drums: [DIG, DIG], step: 3600 },
-      { key: 'm', label: 'MINUTES', drums: [SIX, DIG], step: 60 },
-      { key: 's', label: 'SECONDS', drums: [SIX, DIG], step: 1 },
-    ],
-    date: [
-      { key: 'd', label: 'DAYS', drums: [DIG, DIG, DIG] },
-      { key: 'h', label: 'HOURS', drums: [TWO, DIG] },
-      { key: 'm', label: 'MINUTES', drums: [SIX, DIG] },
-      { key: 's', label: 'SECONDS', drums: [SIX, DIG] },
-    ],
-  };
-
   const display = $('#display');
-  let groups = [];   // [{key, flaps:[Flap]}]
+  const dial = $('#dial');
+  let groups = [];
+  let hasHours = false;
 
-  function buildDisplay(mode) {
+  function buildDisplay(withHours) {
+    hasHours = withHours;
     display.innerHTML = '';
     groups = [];
-    LAYOUTS[mode].forEach((g, i) => {
-      if (i > 0) {
-        const sep = document.createElement('div');
-        sep.className = 'sep' + (i === LAYOUTS[mode].length - 1 ? ' pulse' : '');
-        sep.innerHTML = '<i></i><i></i>';
-        display.appendChild(sep);
+    const layout = withHours
+      ? [['h', [TWO, DIG]], ['m', [SIX, DIG]], ['s', [SIX, DIG]]]
+      : [['m', [SIX, DIG]], ['s', [SIX, DIG]]];
+    layout.forEach(([key, drums], i) => {
+      if (i) {
+        const c = document.createElement('div');
+        c.className = 'colon'; c.textContent = ':';
+        display.appendChild(c);
       }
-      const wrap = document.createElement('div');
-      wrap.className = 'group';
-      wrap.dataset.key = g.key;
-      const up = document.createElement('button'); up.className = 'nudge up'; up.textContent = '▲'; up.title = `Add ${g.label.toLowerCase()}`;
-      const down = document.createElement('button'); down.className = 'nudge down'; down.textContent = '▼'; down.title = `Remove ${g.label.toLowerCase()}`;
-      const flapsEl = document.createElement('div'); flapsEl.className = 'flaps';
-      const flaps = g.drums.map((d) => { const f = new Flap(d); flapsEl.appendChild(f.el); return f; });
-      const label = document.createElement('div'); label.className = 'group-label'; label.textContent = g.label;
-      wrap.append(up, flapsEl, down, label);
-      display.appendChild(wrap);
-      groups.push({ ...g, flaps });
-
-      if (g.step) {
-        bindSlide(wrap, g.step);
-        bindRepeat(up, () => nudge(g.step));
-        bindRepeat(down, () => nudge(-g.step));
-        wrap.addEventListener('wheel', (e) => {
-          if (state.status === 'running' || S.mode !== 'timer') return;
-          e.preventDefault();
-          nudge(e.deltaY < 0 ? g.step : -g.step);
-        }, { passive: false });
-      }
+      const g = document.createElement('div');
+      g.className = 'fgroup';
+      const flaps = drums.map((d) => { const f = new Flap(d); g.appendChild(f.el); return f; });
+      display.appendChild(g);
+      groups.push({ key, flaps });
     });
+    sizeDisplay();
   }
 
-  function render(totalSec) {
-    totalSec = Math.max(0, totalSec);
-    let parts;
-    if (S.mode === 'date') {
-      const d = Math.min(999, Math.floor(totalSec / 86400));
-      const h = Math.floor((totalSec % 86400) / 3600);
-      const m = Math.floor((totalSec % 3600) / 60);
-      const s = totalSec % 60;
-      parts = { d: pad(d, 3), h: pad(h, 2), m: pad(m, 2), s: pad(s, 2) };
-    } else {
-      const h = Math.min(99, Math.floor(totalSec / 3600));
-      const m = Math.floor((totalSec % 3600) / 60);
-      const s = totalSec % 60;
-      parts = { h: pad(h, 2), m: pad(m, 2), s: pad(s, 2) };
-    }
-    groups.forEach((g) => g.flaps.forEach((f, i) => f.set(parts[g.key][i])));
-    return parts;
+  function sizeDisplay() {
+    const size = dial.clientWidth || 340;
+    const cards = hasHours ? 6 : 4, colons = hasHours ? 2 : 1;
+    const cw = Math.min(hasHours ? 64 : 90, (size * 0.84) / (cards * 1.07 + colons * 0.4));
+    display.style.setProperty('--cw', cw.toFixed(1) + 'px');
   }
 
-  // Drag a column up/down to roll it; a plain tap opens the wheels
-  function bindSlide(wrap, step) {
-    let y0 = null, applied = 0, moved = false, id = null;
-    wrap.addEventListener('pointerdown', (e) => {
-      if (e.target.closest('.nudge') || e.button > 0) return;
-      if (S.mode !== 'timer' || state.status === 'running') return;
-      Snd.init();
-      y0 = e.clientY; applied = 0; moved = false; id = e.pointerId;
-      try { wrap.setPointerCapture(id); } catch {}
-    });
-    wrap.addEventListener('pointermove', (e) => {
-      if (y0 === null || e.pointerId !== id) return;
-      const dy = y0 - e.clientY;
-      if (!moved && Math.abs(dy) > 6) { moved = true; wrap.classList.add('dragging'); }
-      const steps = Math.trunc(dy / 22);
-      if (steps !== applied) { nudge((steps - applied) * step); applied = steps; }
-    });
-    let tapped = false;
-    const end = (e) => {
-      if (y0 === null || e.pointerId !== id) return;
-      y0 = null;
-      wrap.classList.toggle('dragging', false);
-      tapped = !moved && e.type === 'pointerup';
+  function render(sec) {
+    sec = clamp(sec, 0, MAX_SEC);
+    const parts = {
+      h: pad(Math.floor(sec / 3600)),
+      m: pad(Math.floor((sec % 3600) / 60)),
+      s: pad(sec % 60),
     };
-    wrap.addEventListener('pointerup', end);
-    wrap.addEventListener('pointercancel', end);
-    // open on click (not pointerup) so the same tap can't land on the new backdrop
-    wrap.addEventListener('click', (e) => {
-      if (tapped && !e.target.closest('.nudge')) picker.open();
-      tapped = false;
-    });
-  }
-
-  function bindRepeat(btn, fn) {
-    let t1, t2;
-    const stop = () => { clearTimeout(t1); clearInterval(t2); };
-    btn.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      Snd.init();
-      fn();
-      t1 = setTimeout(() => { t2 = setInterval(fn, 110); }, 420);
-    });
-    ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => btn.addEventListener(ev, stop));
+    groups.forEach((g) => g.flaps.forEach((f, i) => f.set(parts[g.key][i])));
   }
 
   /* ---------------------------------------------------------
-     Wheel picker: scroll drums like a phone timer.
-     Each detent you roll past clicks like a flap.
+     Formatting
+     --------------------------------------------------------- */
+  function clockText(sec) {
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+  }
+  function wordsText(sec) {
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    const out = [];
+    if (h) out.push(`${h} hr`);
+    if (m) out.push(`${m} min`);
+    if (s) out.push(`${s} sec`);
+    return out.join(', ') || '0 sec';
+  }
+  const timeOfDay = (ms) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+  /* ---------------------------------------------------------
+     Scroll wheels (set the time)
      --------------------------------------------------------- */
   class Wheel {
-    constructor(el) {
+    constructor(el, onChange) {
       this.el = el;
       this.unit = el.dataset.unit;
       this.max = +el.dataset.max;
+      this.label = el.dataset.label;
       this.value = 0;
       this.silent = true;
+      this.onChange = onChange;
       const items = Array.from({ length: this.max + 1 }, (_, i) => `<div class="wheel-item" data-i="${i}">${i}</div>`).join('');
-      el.innerHTML = `<div class="wheel-scroll"><div class="wheel-pad"></div>${items}<div class="wheel-pad"></div></div><span class="wheel-unit">${el.dataset.label}</span>`;
+      el.innerHTML = `<div class="wheel-scroll"><div class="wheel-pad"></div>${items}<div class="wheel-pad"></div></div><span class="wheel-unit"></span>`;
       this.sc = $('.wheel-scroll', el);
+      this.unitEl = $('.wheel-unit', el);
       this.items = $$('.wheel-item', el);
       this.sc.addEventListener('scroll', () => {
         if (!this.raf) this.raf = requestAnimationFrame(() => { this.raf = 0; this.paint(); });
@@ -466,136 +398,104 @@
         const it = e.target.closest('.wheel-item');
         if (it) this.sc.scrollTo({ top: +it.dataset.i * this.ih(), behavior: 'smooth' });
       });
+      this.setUnit();
     }
-    ih() { return this.items[0].offsetHeight || 46; }
+    ih() { return this.items[0].offsetHeight || 36; }
+    setUnit() {
+      this.unitEl.textContent = this.unit === 'h' ? (this.value === 1 ? 'hour' : 'hours') : this.label;
+    }
     paint() {
       const c = this.sc.scrollTop / this.ih();
       const idx = clamp(Math.round(c), 0, this.max);
-      if (idx !== this.value) { this.value = idx; if (!this.silent) Snd.click(0.4); }
-      const lo = Math.max(0, Math.floor(c) - 4), hi = Math.min(this.max, Math.ceil(c) + 4);
+      if (idx !== this.value) {
+        this.value = idx;
+        this.setUnit();
+        if (!this.silent) { Snd.click(0.4); this.onChange(); }
+      }
+      const lo = Math.max(0, Math.floor(c) - 5), hi = Math.min(this.max, Math.ceil(c) + 5);
       if (this.lo !== undefined) {
         for (let i = this.lo; i <= this.hi; i++) {
           if (i >= lo && i <= hi) continue;
-          const it = this.items[i];
-          it.style.transform = ''; it.style.opacity = ''; it.classList.toggle('sel', false);
+          this.items[i].style.transform = ''; this.items[i].style.opacity = '';
         }
       }
       for (let i = lo; i <= hi; i++) {
         const d = i - c, it = this.items[i];
-        it.style.transform = `perspective(380px) rotateX(${(-d * 21).toFixed(1)}deg)`;
-        it.style.opacity = Math.max(0.12, 1 - Math.abs(d) * 0.3).toFixed(2);
-        it.classList.toggle('sel', i === idx);
+        it.style.transform = `perspective(420px) rotateX(${(-d * 17).toFixed(1)}deg)`;
+        it.style.opacity = Math.max(0.15, 1 - Math.abs(d) * 0.2).toFixed(2);
       }
       this.lo = lo; this.hi = hi;
     }
     set(v) {
       this.silent = true;
       this.value = v;
+      this.setUnit();
       this.sc.scrollTop = v * this.ih();
       this.paint();
-      setTimeout(() => { this.silent = false; }, 60);
+      setTimeout(() => { this.silent = false; }, 80);
     }
   }
 
-  let picker = { open() {}, close() {}, isOpen: false };
-  function buildPicker() {
-    const sheet = $('#sheet'), back = $('#sheetBackdrop');
-    const wheels = $$('#wheels .wheel').map((el) => new Wheel(el));
-    const total = () => {
-      const v = {};
-      wheels.forEach((w) => { v[w.unit] = w.value; });
-      return v.h * 3600 + v.m * 60 + v.s;
-    };
-    const p = {
-      isOpen: false,
-      open() {
-        if (state.status === 'running') { flashStatus('PAUSE TO SET'); return; }
-        if (S.mode !== 'timer') setMode('timer');
-        Snd.init();
-        closeDrawer();
-        sheet.classList.add('open'); back.classList.add('open');
-        sheet.setAttribute('aria-hidden', 'false');
-        p.isOpen = true;
-        const t = Math.ceil(state.remainingMs / 1000);
-        const v = { h: Math.floor(t / 3600), m: Math.floor((t % 3600) / 60), s: t % 60 };
-        requestAnimationFrame(() => wheels.forEach((w) => w.set(v[w.unit])));
-      },
-      close() {
-        sheet.classList.toggle('open', false); back.classList.toggle('open', false);
-        sheet.setAttribute('aria-hidden', 'true');
-        p.isOpen = false;
-        wheels.forEach((w) => { w.silent = true; });
-      },
-    };
-    back.addEventListener('click', p.close);
-    $('#pickCancel').addEventListener('click', p.close);
-    $('#pickSet').addEventListener('click', () => { setDuration(total()); p.close(); });
-    $('#pickStart').addEventListener('click', () => { setDuration(total()); p.close(); start(); });
-    $('#btnSet').addEventListener('click', () => p.open());
-    return p;
+  let wheels = [];
+  let wheelSaveT;
+  function wheelTotal() {
+    const v = { h: 0, m: 0, s: 0 };
+    wheels.forEach((w) => { v[w.unit] = w.value; });
+    return v.h * 3600 + v.m * 60 + v.s;
+  }
+  function setWheels(sec) {
+    const v = { h: Math.floor(sec / 3600), m: Math.floor((sec % 3600) / 60), s: sec % 60 };
+    requestAnimationFrame(() => { wheels.forEach((w) => w.set(v[w.unit])); refresh(); });
+  }
+  function onWheelChange() {
+    S.duration = wheelTotal();
+    refresh();
+    clearTimeout(wheelSaveT);
+    wheelSaveT = setTimeout(saveSettings, 300);
   }
 
   /* ---------------------------------------------------------
      Timer state machine
      --------------------------------------------------------- */
-  const MAX_TIMER = 99 * 3600 + 59 * 60 + 59;
   const state = {
-    status: 'idle',          // idle | running | paused | done
-    endAt: 0,                // epoch ms when running
-    remainingMs: S.duration * 1000,
+    status: 'idle',   // idle | running | paused | done
+    endAt: 0,
+    remainingMs: 0,
+    totalMs: 0,
     lastSec: null,
-    startedSec: null,
   };
 
   const saveState = () => {
     try {
       localStorage.setItem(STATE_KEY, JSON.stringify({
-        status: state.status, endAt: state.endAt, remainingMs: state.remainingMs, mode: S.mode,
+        status: state.status, endAt: state.endAt, remainingMs: state.remainingMs, totalMs: state.totalMs,
       }));
     } catch {}
   };
 
-  const targetMs = () => (S.target ? new Date(S.target).getTime() : NaN);
-
-  function currentRemainingMs() {
-    if (state.status === 'running') return state.endAt - Date.now();
-    return state.remainingMs;
-  }
-
-  function nudge(deltaSec) {
-    if (S.mode !== 'timer' || state.status === 'running') return;
-    const cur = Math.ceil(state.remainingMs / 1000);
-    const next = clamp(cur + deltaSec, 0, MAX_TIMER);
-    S.duration = next;
-    state.remainingMs = next * 1000;
-    state.status = 'idle';
-    saveSettings(); saveState();
-    refresh(true);
-  }
-
-  function setDuration(sec) {
-    if (S.mode !== 'timer') setMode('timer');
-    stopAudio();
-    S.duration = clamp(sec, 0, MAX_TIMER);
-    state.status = 'idle';
-    state.remainingMs = S.duration * 1000;
-    saveSettings(); saveState();
-    refresh(true);
-  }
-
-  function start() {
+  function startFresh(sec) {
+    if (sec <= 0) return;
     Snd.init();
-    if (S.mode === 'date') {
-      const tm = targetMs();
-      if (!isFinite(tm)) { openDrawer(); $('#targetDate').focus(); return; }
-      if (tm - Date.now() <= 0) { flashStatus('TARGET PASSED'); return; }
-      state.endAt = tm;
-    } else {
-      if (state.remainingMs <= 0) { flashStatus('SET A TIME'); return; }
-      state.endAt = Date.now() + state.remainingMs;
-    }
+    stopAlarm();
+    S.duration = sec;
+    addRecent(sec);
+    state.totalMs = sec * 1000;
+    state.remainingMs = state.totalMs;
+    state.endAt = Date.now() + state.totalMs;
     state.status = 'running';
-    state.startedSec = Math.ceil((state.endAt - Date.now()) / 1000);
+    state.lastSec = null;
+    showFace();
+    buildDisplay(sec >= 3600);
+    keepAwake(true);
+    saveState();
+    refresh();
+    tick();
+  }
+
+  function resume() {
+    Snd.init();
+    state.endAt = Date.now() + state.remainingMs;
+    state.status = 'running';
     keepAwake(true);
     saveState();
     refresh();
@@ -604,48 +504,89 @@
   function pause() {
     state.remainingMs = Math.max(0, state.endAt - Date.now());
     state.status = 'paused';
-    stopAudio();
+    keepAwake(false);
     saveState();
     refresh();
   }
 
-  function reset() {
-    stopAudio();
+  function cancel() {
+    stopAlarm();
     state.status = 'idle';
-    state.remainingMs = S.mode === 'date'
-      ? Math.max(0, (targetMs() || Date.now()) - Date.now())
-      : S.duration * 1000;
-    document.body.classList.remove('critical');
+    state.lastSec = null;
+    keepAwake(false);
+    showFace();
+    setWheels(S.duration);
     saveState();
-    refresh(true);
+    refresh();
   }
 
-  function finish(silent = false) {
+  function finish() {
     state.status = 'done';
     state.remainingMs = 0;
     render(0);
-    saveState();
     keepAwake(false);
-    if (!silent) {
-      try { navigator.vibrate?.([400, 120, 400, 120, 800]); } catch {}
-      if (S.shake) {
-        const stage = $('#stage');
-        stage.classList.remove('shake'); void stage.offsetWidth; stage.classList.add('shake');
-        const fl = $('#flash');
-        fl.classList.remove('go'); void fl.offsetWidth; fl.classList.add('go');
-      }
-      // The alarm is the board itself: every card clatters through a full
-      // revolution, twice, and settles back on zero.
-      const rattle = (delay) => setTimeout(() => {
-        groups.forEach((g, gi) => g.flaps.forEach((f, i) => setTimeout(() => f.spin(), (gi * 2 + i) * 70)));
-      }, delay);
-      rattle(350);
-      rattle(2300);
-    }
+    saveState();
     refresh();
+    showAlarm();
   }
 
-  function stopAudio() { keepAwake(false); }
+  function primary() {
+    if (state.status === 'running') pause();
+    else if (state.status === 'paused') resume();
+    else startFresh(wheelTotal());
+  }
+
+  // Main loop
+  function tick() {
+    if (state.status !== 'running') return;
+    const ms = state.endAt - Date.now();
+    if (ms <= 0) { finish(); return; }
+    const sec = Math.ceil(ms / 1000);
+    if (sec !== state.lastSec) {
+      state.lastSec = sec;
+      render(sec);
+      document.title = `${clockText(sec)} · ${S.label || 'Timer'}`;
+    }
+  }
+
+  // Ring: drains smoothly every frame
+  const ring = $('#ringProg');
+  const C = 2 * Math.PI * 96;
+  ring.style.strokeDasharray = C.toFixed(2);
+  function frame() {
+    requestAnimationFrame(frame);
+    if (dial.hidden || !state.totalMs) return;
+    const rem = state.status === 'running' ? Math.max(0, state.endAt - Date.now()) : state.remainingMs;
+    ring.style.strokeDashoffset = (C * (1 - rem / state.totalMs)).toFixed(2);
+  }
+
+  /* ---------------------------------------------------------
+     When the timer ends
+     --------------------------------------------------------- */
+  let alarmT = null, alarmCount = 0;
+  function rattle() {
+    groups.forEach((g, gi) => g.flaps.forEach((f, i) => setTimeout(() => f.spin(), (gi * 2 + i) * 70)));
+  }
+  function showAlarm() {
+    $('#alertTitle').textContent = S.label || 'Timer';
+    $('#alert').hidden = false;
+    $('#alertStop').focus({ preventScroll: true });
+    document.title = `Done · ${S.label || 'Timer'}`;
+    try { navigator.vibrate?.([400, 150, 400, 150, 800]); } catch {}
+    if (S.endSound === 'silent') return;
+    rattle();
+    if (S.endSound === 'rattle') {
+      alarmCount = 0;
+      alarmT = setInterval(() => {
+        if (++alarmCount > 20 || state.status !== 'done') { stopAlarm(); return; }
+        rattle();
+      }, 2400);
+    }
+  }
+  function stopAlarm() {
+    clearInterval(alarmT); alarmT = null;
+    $('#alert').hidden = true;
+  }
 
   // Keep the phone screen on while the timer runs
   let wakeLock = null;
@@ -660,441 +601,276 @@
     } catch { wakeLock = null; }
   }
 
-  function toggle() {
-    if (state.status === 'running') pause();
-    else if (state.status === 'done') { reset(); }
-    else start();
+  /* ---------------------------------------------------------
+     View sync
+     --------------------------------------------------------- */
+  function showFace() {
+    const idle = state.status === 'idle';
+    $('#picker').hidden = !idle;
+    dial.hidden = idle;
   }
 
-  // Main loop
-  function tick() {
-    if (state.status === 'running') {
-      const ms = state.endAt - Date.now();
-      if (ms <= 0) { finish(); return; }
-      const sec = Math.ceil(ms / 1000);
-      if (sec !== state.lastSec) onSecond(sec);
-    }
-  }
-
-  function onSecond(sec) {
-    state.lastSec = sec;
-    const parts = render(sec);
-    updateTitle(parts);
-
-    const critical = sec <= 10;
-    document.body.classList.toggle('critical', critical);
-    $('#lampCrit').classList.toggle('on', critical);
-    $('#lampCrit').classList.toggle('blink', critical);
-
-
-    $('#statusText').textContent = critical ? 'CRITICAL' : 'T-MINUS · LIVE';
-  }
-
-  function updateTitle(parts) {
-    const txt = S.mode === 'date'
-      ? `${parts.d}d ${parts.h}:${parts.m}:${parts.s}`
-      : `${parts.h}:${parts.m}:${parts.s}`;
-    document.title = `${txt} · ${S.label || 'T-MINUS'}`;
-  }
-
-  let statusFlashT;
-  function flashStatus(msg) {
-    const el = $('#statusText');
-    el.textContent = msg;
-    clearTimeout(statusFlashT);
-    statusFlashT = setTimeout(() => refresh(), 1800);
-  }
-
-  // Sync everything visible to the state
-  function refresh(rerender = false) {
-    const running = state.status === 'running';
-    document.body.classList.toggle('running', running);
-    document.body.classList.toggle('mode-date', S.mode === 'date');
+  function refresh() {
+    const st = state.status;
+    document.body.classList.toggle('running', st === 'running');
+    document.body.classList.toggle('paused', st === 'paused');
 
     const btn = $('#btnStart');
-    btn.classList.toggle('live', running);
-    $('span', btn).textContent =
-      running ? 'PAUSE' :
-      state.status === 'paused' ? 'RESUME' :
-      state.status === 'done' ? 'AGAIN' :
-      (S.mode === 'date' ? 'ARM' : 'START');
+    const label = st === 'running' ? 'Pause' : st === 'paused' ? 'Resume' : 'Start';
+    $('span', btn).textContent = label;
+    btn.classList.toggle('pause', st === 'running');
+    btn.classList.toggle('start', st !== 'running');
+    btn.disabled = st === 'idle' && wheelTotal() === 0;
+    $('#btnCancel').disabled = st === 'idle';
 
-    const remMs = currentRemainingMs();
-    $('#lampArmed').classList.toggle('on', remMs > 0 || running);
-    $('#lampRun').classList.toggle('on', running);
-    if (!running) {
-      const crit = state.status === 'done';
-      $('#lampCrit').classList.toggle('on', crit);
-      $('#lampCrit').classList.toggle('blink', crit);
-      if (!crit) document.body.classList.remove('critical');
-    }
+    $('#dialLabel').textContent = S.label;
+    updateEndTime();
 
-    const st = $('#statusText');
-    if (!running) {
-      st.textContent = { idle: 'STANDBY', paused: 'HOLD', done: '· ZERO ·' }[state.status];
-    } else if (!st.textContent.startsWith('T-MINUS') && st.textContent !== 'CRITICAL') {
-      st.textContent = 'T-MINUS · LIVE';
-    }
-
-    if (rerender || !running) {
-      const sec = Math.max(0, Math.ceil(remMs / 1000));
-      state.lastSec = running ? state.lastSec : null;
-      updateTitle(render(sec));
+    if (st === 'idle') document.title = S.label || 'Timer';
+    if (st === 'paused') {
+      const sec = Math.ceil(state.remainingMs / 1000);
+      render(sec);
+      document.title = `${clockText(sec)} · Paused`;
     }
   }
 
-  function setMode(mode) {
-    if (mode === S.mode) return;
-    stopAudio();
-    S.mode = mode;
+  let lastEndText = '';
+  function updateEndTime() {
+    let ms = null;
+    if (state.status === 'running') ms = state.endAt;
+    else if (state.status === 'paused') ms = Date.now() + state.remainingMs;
+    const txt = ms ? timeOfDay(ms) : '';
+    if (txt !== lastEndText) { $('#endTime').textContent = txt; lastEndText = txt; }
+    $('#dialEnd').style.visibility = ms ? 'visible' : 'hidden';
+  }
+
+  /* ---------------------------------------------------------
+     Recents
+     --------------------------------------------------------- */
+  function addRecent(sec) {
+    S.recents = [sec, ...S.recents.filter((x) => x !== sec)].slice(0, 6);
     saveSettings();
-    $$('#modeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
-    $('#dateRow').hidden = mode !== 'date';
-    $('#presets').style.display = mode === 'date' ? 'none' : '';
-    buildDisplay(mode);
-    state.status = 'idle';
-    state.remainingMs = mode === 'date'
-      ? Math.max(0, (targetMs() || Date.now()) - Date.now())
-      : S.duration * 1000;
-    saveState();
-    refresh(true);
+    renderRecents();
+  }
+  function renderRecents() {
+    const box = $('#recents');
+    box.innerHTML = S.recents.map((sec) => {
+      const n = Number(sec) | 0;
+      return `<div class="recent" data-sec="${n}">
+        <div><div class="t">${clockText(n)}</div><div class="s">${wordsText(n)}</div></div>
+        <button class="play" data-sec="${n}" aria-label="Start ${wordsText(n)}"><svg viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z"/></svg></button>
+      </div>`;
+    }).join('');
   }
 
   /* ---------------------------------------------------------
      Wallpapers
      --------------------------------------------------------- */
-  const svgNoise = (freq, oct, seed, matrix, size = 400) =>
-    `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='${size}' height='${size}'><filter id='f'><feTurbulence type='fractalNoise' baseFrequency='${freq}' numOctaves='${oct}' seed='${seed}' stitchTiles='stitch'/><feColorMatrix values='${matrix}'/></filter><rect width='100%' height='100%' filter='url(%23f)'/></svg>")`;
-
-  const GRIT = svgNoise('.9', 4, 2, '0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 .7 0', 300);
-  const LIGHT_GRIT = svgNoise('.65', 3, 9, '0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .18 0', 300);
-
-  const WALLPAPERS = {
-    bunker: {
-      name: 'Bunker',
-      css: `${GRIT}, ${svgNoise('.018', 5, 4, '0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -1.6 1.1', 700)}, radial-gradient(ellipse at 50% 25%, #4d504b 0%, #2a2c29 45%, #101110 100%)`,
-    },
-    rust: {
-      name: 'Rust',
-      css: `${GRIT}, ${svgNoise('.011', 5, 11, '0 0 0 0 .55  0 0 0 0 .22  0 0 0 0 .06  0 0 0 -2.2 1.3', 800)}, ${svgNoise('.04', 3, 5, '0 0 0 0 .2  0 0 0 0 .08  0 0 0 0 .02  0 0 0 -3 1.6', 500)}, linear-gradient(160deg, #3d3b36, #1d1b18)`,
-    },
-    doom: {
-      name: 'Doom Haze',
-      css: `${GRIT}, radial-gradient(ellipse at 50% 55%, rgba(80,200,50,.28) 0%, rgba(30,90,20,.18) 35%, transparent 70%), ${svgNoise('.006 .02', 4, 21, '0 0 0 0 .1  0 0 0 0 .35  0 0 0 0 .08  0 0 0 -1.8 1.1', 900)}, linear-gradient(#070b06, #020302)`,
-    },
-    wood: {
-      name: '90s Den',
-      css: `${svgNoise('.003 .3', 3, 8, '0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 .55 0', 500)}, repeating-linear-gradient(90deg, #2a170b 0 3px, #5b3519 3px 72px, #4e2c14 72px 74px, #6a3f1f 74px 150px, #2a170b 150px 153px, #5f3a1b 153px 228px), #3a2210`,
-    },
-    crt: {
-      name: 'Dead Channel',
-      css: `${LIGHT_GRIT}, ${GRIT}, radial-gradient(ellipse at center, #26303a 0%, #10161c 55%, #040608 100%)`,
-    },
-    blood: {
-      name: 'Blood Moon',
-      css: `${GRIT}, radial-gradient(circle at 72% 22%, #e2643a 0 4.5%, rgba(190,50,25,.55) 5%, rgba(120,20,10,.18) 18%, transparent 38%), radial-gradient(ellipse at 50% 120%, #2a0806, transparent 60%), linear-gradient(#130504, #030101)`,
-    },
-    grid: {
-      name: 'Vector',
-      css: `${GRIT}, linear-gradient(rgba(0,0,0,0) 55%, rgba(0,0,0,.85)), repeating-linear-gradient(0deg, rgba(var(--accent-rgb), .16) 0 1px, transparent 1px 46px), repeating-linear-gradient(90deg, rgba(var(--accent-rgb), .16) 0 1px, transparent 1px 46px), radial-gradient(ellipse at 50% 40%, #0e150d, #020302)`,
-    },
-    cell: {
-      name: 'Cell Block',
-      css: `${GRIT}, repeating-linear-gradient(0deg, transparent 0 58px, rgba(0,0,0,.55) 58px 62px), repeating-linear-gradient(90deg, transparent 0 118px, rgba(0,0,0,.5) 118px 122px), radial-gradient(ellipse at 50% 10%, #5a5c55, #262723 60%, #0d0d0c)`,
-    },
+  const WALLS = {
+    black:    '#000',
+    graphite: 'linear-gradient(180deg, #2c2c2f 0%, #111113 55%, #000 100%)',
+    midnight: 'radial-gradient(120% 80% at 50% 0%, #1a3a6e 0%, #0a1830 45%, #000 85%)',
+    aurora:   'radial-gradient(60% 45% at 15% 10%, rgba(94,92,230,.6), transparent 70%), radial-gradient(55% 45% at 90% 35%, rgba(48,209,88,.35), transparent 70%), radial-gradient(70% 55% at 50% 100%, rgba(10,132,255,.4), transparent 70%), #000',
+    sunset:   'radial-gradient(90% 60% at 50% 0%, rgba(255,159,10,.6), transparent 65%), radial-gradient(80% 60% at 0% 60%, rgba(255,55,95,.45), transparent 70%), #0a0406',
+    forest:   'radial-gradient(110% 70% at 50% 0%, #135a3c, #06200f 55%, #000 90%)',
   };
-
-  let customObjectUrl = null;
+  let photoUrl = null;
 
   async function applyWallpaper() {
     const wp = $('#wallpaper');
-    if (S.wallpaper === 'custom-file') {
+    if (S.wallpaper === 'photo') {
       const blob = await idb.get('wallpaper');
       if (blob) {
-        if (customObjectUrl) URL.revokeObjectURL(customObjectUrl);
-        customObjectUrl = URL.createObjectURL(blob);
-        wp.style.background = `#000 url(${JSON.stringify(customObjectUrl)}) center / cover no-repeat`;
-      } else { S.wallpaper = 'bunker'; return applyWallpaper(); }
-    } else if (S.wallpaper === 'custom-url' && S.wallUrl) {
-      wp.style.background = `#000 url(${JSON.stringify(S.wallUrl)}) center / cover no-repeat`;
+        if (photoUrl) URL.revokeObjectURL(photoUrl);
+        photoUrl = URL.createObjectURL(blob);
+        wp.style.background = `#000 url(${JSON.stringify(photoUrl)}) center / cover no-repeat`;
+      } else { S.wallpaper = 'black'; return applyWallpaper(); }
     } else {
-      const p = WALLPAPERS[S.wallpaper] || WALLPAPERS.bunker;
-      wp.style.background = p.css;
+      wp.style.background = WALLS[S.wallpaper] || WALLS.black;
     }
     wp.style.filter = S.wallBlur ? `blur(${S.wallBlur}px)` : '';
-    $('#wallpaperDim').style.opacity = S.wallDim / 100;
-    $$('.swatch').forEach((s) => s.classList.toggle('on', s.dataset.wp === S.wallpaper));
+    $('#wallDim').style.opacity = S.wallDim / 100;
+    renderSwatches();
   }
 
-  function buildSwatches() {
+  function renderSwatches() {
     const box = $('#swatches');
     box.innerHTML = '';
-    Object.entries(WALLPAPERS).forEach(([id, p]) => {
+    const add = (id, bg, name) => {
       const b = document.createElement('button');
-      b.className = 'swatch'; b.dataset.wp = id;
-      b.style.background = p.css;
-      b.innerHTML = `<span>${p.name}</span>`;
+      b.className = 'swatch' + (S.wallpaper === id ? ' on' : '');
+      b.style.background = bg;
+      b.setAttribute('aria-label', name);
       b.addEventListener('click', () => { S.wallpaper = id; saveSettings(); applyWallpaper(); });
       box.appendChild(b);
-    });
-    const hasCustom = S.wallpaper === 'custom-file' || (S.wallpaper === 'custom-url' && S.wallUrl);
-    if (hasCustom) {
-      const b = document.createElement('button');
-      b.className = 'swatch'; b.dataset.wp = S.wallpaper;
-      b.style.background = $('#wallpaper').style.background;
-      b.innerHTML = '<span>Yours</span>';
-      b.addEventListener('click', () => applyWallpaper());
-      box.appendChild(b);
-    }
-    $$('.swatch').forEach((s) => s.classList.toggle('on', s.dataset.wp === S.wallpaper));
-  }
-
-  /* ---------------------------------------------------------
-     Film grain
-     --------------------------------------------------------- */
-  function startGrain() {
-    const c = $('#grain');
-    const g = c.getContext('2d');
-    c.width = 240; c.height = 135;
-    const img = g.createImageData(c.width, c.height);
-    let last = 0;
-    const frame = (t) => {
-      requestAnimationFrame(frame);
-      if (t - last < 70 || !S.crt) return;
-      last = t;
-      const d = img.data;
-      for (let i = 0; i < d.length; i += 4) {
-        const v = (Math.random() * 255) | 0;
-        d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
-      }
-      g.putImageData(img, 0, 0);
     };
-    requestAnimationFrame(frame);
+    Object.entries(WALLS).forEach(([id, bg]) => add(id, bg, id[0].toUpperCase() + id.slice(1)));
+    if (photoUrl) add('photo', `#000 url(${JSON.stringify(photoUrl)}) center / cover`, 'Your photo');
   }
 
   /* ---------------------------------------------------------
-     UI wiring
+     Wiring
      --------------------------------------------------------- */
-  const drawer = $('#drawer');
-  const openDrawer = () => { drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); };
-  const closeDrawer = () => { drawer.classList.remove('open'); drawer.setAttribute('aria-hidden', 'true'); };
-
-  function syncMuteBtn() { $('#btnMute').classList.toggle('toggled-off', S.muted); }
+  function setFill(el) {
+    const p = ((el.value - el.min) / (el.max - el.min)) * 100;
+    el.style.setProperty('--p', p + '%');
+  }
 
   function wire() {
-    // unlock audio on first gesture anywhere
     const unlock = () => { Snd.init(); if (state.status === 'running') keepAwake(true); };
     window.addEventListener('pointerdown', unlock, { once: true });
     window.addEventListener('keydown', unlock, { once: true });
 
-    // tactile key feedback
-    document.addEventListener('pointerdown', (e) => {
-      if (e.target.closest('.key, .seg button, .swatch')) { Snd.init(); Snd.click(0.45); }
+    $('#btnStart').addEventListener('click', primary);
+    $('#btnCancel').addEventListener('click', cancel);
+    $('#alertStop').addEventListener('click', cancel);
+    $('#alertRepeat').addEventListener('click', () => { const d = S.duration; cancel(); startFresh(d); });
+
+    // Recents: play button starts it, tapping the row loads it onto the wheels
+    $('#recents').addEventListener('click', (e) => {
+      const row = e.target.closest('.recent');
+      if (!row) return;
+      const sec = +row.dataset.sec;
+      if (e.target.closest('.play')) { cancelSilently(); startFresh(sec); return; }
+      if (state.status === 'idle') { S.duration = sec; saveSettings(); setWheels(sec); refresh(); }
     });
 
-    $('#btnStart').addEventListener('click', toggle);
-    $('#btnReset').addEventListener('click', reset);
-    $$('[data-preset]').forEach((b) => b.addEventListener('click', () => setDuration(+b.dataset.preset)));
-
-    $('#btnMute').addEventListener('click', () => { S.muted = !S.muted; saveSettings(); Snd.applyVolumes(); syncMuteBtn(); });
-    $('#btnFull').addEventListener('click', toggleFull);
-    $('#btnSettings').addEventListener('click', () => (drawer.classList.contains('open') ? closeDrawer() : openDrawer()));
-    $('#btnCloseSettings').addEventListener('click', closeDrawer);
-    document.addEventListener('fullscreenchange', () => document.body.classList.toggle('fullscreen', !!document.fullscreenElement));
-
-    // Editable label
+    // Label
     const label = $('#label');
-    label.textContent = S.label;
-    label.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); label.blur(); } });
-    label.addEventListener('input', () => {
-      S.label = label.textContent.replace(/\s+/g, ' ').trim().slice(0, 28).toUpperCase();
-      saveSettings();
-    });
-    label.addEventListener('blur', () => { label.textContent = S.label || 'T-MINUS'; S.label = label.textContent; saveSettings(); });
+    label.value = S.label;
+    label.addEventListener('input', () => { S.label = label.value.trim().slice(0, 28); saveSettings(); refresh(); });
+    label.addEventListener('keydown', (e) => { if (e.key === 'Enter') label.blur(); });
 
-    // Mode
-    $$('#modeSeg button').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
-    const td = $('#targetDate');
-    if (S.target) td.value = S.target;
-    td.addEventListener('change', () => {
-      S.target = td.value || null;
-      saveSettings();
-      if (S.mode === 'date') {
-        const wasRunning = state.status === 'running';
-        reset();
-        if (wasRunning) start();
-      }
-    });
+    // When timer ends
+    const endSel = $('#endSound');
+    endSel.value = S.endSound;
+    endSel.addEventListener('change', () => { S.endSound = endSel.value; saveSettings(); });
 
-    // Wallpaper
-    $('#wallFile').addEventListener('change', async (e) => {
-      const f = e.target.files[0];
-      if (!f) return;
-      await idb.set('wallpaper', f);
-      S.wallpaper = 'custom-file';
-      saveSettings();
-      await applyWallpaper();
-      buildSwatches();
-      e.target.value = '';
-    });
-    const wu = $('#wallUrl');
-    wu.value = S.wallUrl || '';
-    wu.addEventListener('change', async () => {
-      const v = wu.value.trim();
-      if (!v) return;
-      S.wallUrl = v; S.wallpaper = 'custom-url';
-      saveSettings(); await applyWallpaper(); buildSwatches();
-    });
-    const dim = $('#wallDim'), blur = $('#wallBlur');
-    dim.value = S.wallDim; blur.value = S.wallBlur;
-    dim.addEventListener('input', () => { S.wallDim = +dim.value; saveSettings(); applyWallpaper(); });
-    blur.addEventListener('input', () => { S.wallBlur = +blur.value; saveSettings(); applyWallpaper(); });
-
-    // Accent
-    $$('#accentSeg button').forEach((b) => {
-      b.classList.toggle('on', b.dataset.accent === S.accent);
-      b.addEventListener('click', () => {
-        S.accent = b.dataset.accent; saveSettings();
-        document.body.dataset.accent = S.accent;
-        $$('#accentSeg button').forEach((x) => x.classList.toggle('on', x === b));
-      });
-    });
-
-    // Sound
-    // Volume + echo sliders (the console fader and the Setup slider stay in sync)
-    const sliders = [['volMaster', 'volMaster'], ['volClick', 'volClick'], ['volClickMain', 'volClick'], ['echo', 'echo']];
-    sliders.forEach(([id, k]) => {
+    // Sliders
+    [['volClick', 'volClick', true], ['echo', 'echo', true], ['wallDimRange', 'wallDim'], ['wallBlur', 'wallBlur']].forEach(([id, k, sound]) => {
       const el = $('#' + id);
       el.value = S[k];
+      setFill(el);
       el.addEventListener('input', () => {
         S[k] = +el.value;
-        sliders.forEach(([id2, k2]) => { if (k2 === k && id2 !== id) $('#' + id2).value = S[k]; });
-        saveSettings(); Snd.applyVolumes();
+        setFill(el);
+        saveSettings();
+        if (sound) Snd.applyVolumes(); else applyWallpaper();
       });
-      el.addEventListener('change', () => { Snd.init(); Snd.click(1); });
+      if (sound) el.addEventListener('change', () => { Snd.init(); Snd.click(1); });
     });
 
+    // Silent switch (only where the browser supports it)
     $('#silentRow').hidden = !('audioSession' in navigator);
-    [['optShake', 'shake'], ['optCrt', 'crt'], ['optSilent', 'ignoreSilent']].forEach(([id, k]) => {
-      const el = $('#' + id);
-      el.checked = !!S[k];
-      el.addEventListener('change', () => {
-        S[k] = el.checked; saveSettings();
-        document.body.classList.toggle('no-crt', !S.crt);
-        Snd.applyVolumes();
-      });
-    });
+    const sil = $('#optSilent');
+    sil.checked = !!S.ignoreSilent;
+    sil.addEventListener('change', () => { S.ignoreSilent = sil.checked; saveSettings(); Snd.applyVolumes(); });
 
+    // Custom click sound
     $('#tickFile').addEventListener('change', async (e) => {
       const f = e.target.files[0];
       if (!f) return;
       Snd.init();
       const buf = await f.arrayBuffer();
-      const ok = await Snd.loadCustom(buf);
-      if (ok) {
+      if (await Snd.loadCustom(buf)) {
         await idb.set('tick', { name: f.name, buf });
-        $('#tickNote').textContent = `Using your sound: ${f.name}`;
+        setTickNote(f.name);
         Snd.click(1);
       } else {
-        $('#tickNote').textContent = 'Could not read that audio file. Try a WAV, MP3 or OGG.';
+        $('#tickNote').textContent = "Couldn't read that file";
       }
       e.target.value = '';
     });
     $('#tickClear').addEventListener('click', async () => {
       await Snd.loadCustom(null);
       await idb.del('tick');
-      $('#tickNote').textContent = 'Using the built-in synthesized flap.';
+      setTickNote(null);
+    });
+
+    // Wallpaper photo
+    $('#wallFile').addEventListener('change', async (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      await idb.set('wallpaper', f);
+      S.wallpaper = 'photo';
+      saveSettings();
+      await applyWallpaper();
+      e.target.value = '';
+    });
+
+    // Light tactile click on the round buttons
+    document.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.round, .play, .alert-actions button')) { Snd.init(); Snd.click(0.35); }
     });
 
     // Keyboard
     document.addEventListener('keydown', (e) => {
-      if (e.target.closest('input, [contenteditable="true"]')) return;
+      if (e.target.closest('input, select, textarea')) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const k = e.key.toLowerCase();
-      if (picker.isOpen) {
-        if (k === 'escape') picker.close();
-        else if (k === 'enter') $('#pickSet').click();
+      if (!$('#alert').hidden) {
+        if (e.key === 'Enter' || e.key === 'Escape' || e.key === ' ') { e.preventDefault(); cancel(); }
         return;
       }
-      if (k === ' ') { e.preventDefault(); pressKey('#btnStart'); toggle(); }
-      else if (k === 'r') { pressKey('#btnReset'); reset(); }
-      else if (k === 'm') { pressKey('#btnMute'); $('#btnMute').click(); }
-      else if (k === 'f') { pressKey('#btnFull'); toggleFull(); }
-      else if (k === 's') { drawer.classList.contains('open') ? closeDrawer() : openDrawer(); }
-      else if (k === 't') picker.open();
-      else if (k === 'escape') closeDrawer();
-      else if (k === 'arrowup' && S.mode === 'timer') nudge(60);
-      else if (k === 'arrowdown' && S.mode === 'timer') nudge(-60);
+      if (e.key === ' ') { e.preventDefault(); if (!$('#btnStart').disabled) primary(); }
+      else if (e.key === 'Escape' || e.key.toLowerCase() === 'r') { if (state.status !== 'idle') cancel(); }
     });
 
-    // When returning to a hidden tab, flaps catch up instantly instead of replaying
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) return;
       tick();
       if (state.status === 'running') keepAwake(true);
     });
+    window.addEventListener('resize', sizeDisplay);
   }
 
-  function pressKey(sel) {
-    const el = $(sel);
-    el.classList.add('pressed');
-    setTimeout(() => el.classList.remove('pressed'), 110);
-    Snd.init(); Snd.click(0.45);
+  function cancelSilently() {
+    if (state.status !== 'idle') { stopAlarm(); state.status = 'idle'; }
   }
 
-  function toggleFull() {
-    if (document.fullscreenElement) document.exitFullscreen();
-    else document.documentElement.requestFullscreen?.().catch(() => {});
+  function setTickNote(name) {
+    $('#tickNote').textContent = name || 'Built-in';
+    $('#tickClear').hidden = !name;
   }
 
   /* ---------------------------------------------------------
      Boot
      --------------------------------------------------------- */
   async function boot() {
-    document.body.dataset.accent = S.accent;
-    document.body.classList.toggle('no-crt', !S.crt);
-    $$('#modeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === S.mode));
-    $('#dateRow').hidden = S.mode !== 'date';
-    $('#presets').style.display = S.mode === 'date' ? 'none' : '';
-    syncMuteBtn();
-
-    picker = buildPicker();
-    buildDisplay(S.mode);
+    S.duration = clamp(S.duration | 0, 0, MAX_SEC);
+    wheels = $$('#picker .wheel').map((el) => new Wheel(el, onWheelChange));
     wire();
+    renderRecents();
+
+    const savedPhoto = S.wallpaper === 'photo' ? await idb.get('wallpaper') : null;
+    if (savedPhoto) photoUrl = URL.createObjectURL(savedPhoto);
     await applyWallpaper();
-    buildSwatches();
-    startGrain();
 
-    const saved = await idb.get('tick');
-    if (saved && saved.buf) {
-      await Snd.loadCustom(saved.buf);
-      $('#tickNote').textContent = `Using your sound: ${saved.name}`;
-    }
+    const tick0 = await idb.get('tick');
+    if (tick0 && tick0.buf) { await Snd.loadCustom(tick0.buf); setTickNote(tick0.name); }
 
-    // Restore a timer that was running when the page closed
+    // Pick up a timer that was running or paused when the app closed
     const st = readJSON(STATE_KEY);
-    if (st && st.mode === S.mode) {
+    if (st && st.totalMs > 0 && (st.status === 'running' || st.status === 'paused')) {
       if (st.status === 'running' && st.endAt > Date.now()) {
-        state.status = 'running'; state.endAt = st.endAt;
-        state.startedSec = Math.ceil((st.endAt - Date.now()) / 1000);
-      } else if (st.status === 'running') {
-        state.status = 'done'; state.remainingMs = 0;
-      } else if (st.status === 'paused' || st.status === 'done') {
-        state.status = st.status; state.remainingMs = st.remainingMs;
-      } else {
-        state.remainingMs = S.mode === 'date'
-          ? Math.max(0, (targetMs() || Date.now()) - Date.now())
-          : S.duration * 1000;
+        Object.assign(state, { status: 'running', endAt: st.endAt, totalMs: st.totalMs });
+      } else if (st.status === 'paused') {
+        Object.assign(state, { status: 'paused', remainingMs: st.remainingMs, totalMs: st.totalMs });
       }
-    } else if (S.mode === 'date') {
-      state.remainingMs = Math.max(0, (targetMs() || Date.now()) - Date.now());
     }
 
-    // Startup: the board spins up from zero to the set time
-    setTimeout(() => { refresh(true); }, 350);
-    setInterval(tick, 100);
+    showFace();
+    if (state.status === 'idle') {
+      setWheels(S.duration);
+    } else {
+      buildDisplay(state.totalMs >= 3600 * 1000);
+      // the cards roll up from zero to where the timer is
+      setTimeout(() => { tick(); refresh(); }, 300);
+    }
+    refresh();
+    requestAnimationFrame(frame);
+    setInterval(() => { tick(); if (state.status === 'paused') updateEndTime(); }, 100);
 
-    // Installable phone app: cache everything so it runs offline
+    // Installable app: cache everything so it runs offline
     try {
       if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
         navigator.serviceWorker.register('sw.js').catch(() => {});

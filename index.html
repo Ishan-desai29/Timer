@@ -2,168 +2,140 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>T-MINUS · Split-Flap Countdown</title>
-  <meta name="theme-color" content="#0b0d0a" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Timer</title>
+  <meta name="theme-color" content="#000000" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" type="image/png" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black" />
-  <meta name="apple-mobile-web-app-title" content="T-MINUS" />
+  <meta name="apple-mobile-web-app-title" content="Flip Timer" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;700&family=Special+Elite&family=VT323&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
-<body data-accent="doom">
-  <!-- Wallpaper layers -->
-  <div id="wallpaper" class="wallpaper"></div>
-  <div class="wallpaper-dim" id="wallpaperDim"></div>
-  <div class="vignette"></div>
-  <canvas id="grain" class="grain"></canvas>
-  <div class="scanlines"></div>
-  <div class="flash" id="flash"></div>
+<body>
+  <div class="wallpaper" id="wallpaper"></div>
+  <div class="wall-dim" id="wallDim"></div>
 
-  <main class="stage" id="stage">
-    <section class="housing" id="housing">
-      <span class="screw tl"></span><span class="screw tr"></span>
-      <span class="screw bl"></span><span class="screw br"></span>
+  <main class="app">
+    <div class="col-main">
+      <header class="nav"><h1>Timer</h1></header>
 
-      <header class="housing-top">
-        <div class="dymo" id="label" contenteditable="true" spellcheck="false" title="Click to rename">DOOMSDAY</div>
-        <div class="lamps">
-          <div class="lamp-wrap"><span class="lamp" id="lampArmed"></span><small>ARMED</small></div>
-          <div class="lamp-wrap"><span class="lamp" id="lampRun"></span><small>RUN</small></div>
-          <div class="lamp-wrap"><span class="lamp danger" id="lampCrit"></span><small>CRIT</small></div>
+      <section class="face">
+        <!-- Idle: scroll wheels -->
+        <div class="picker" id="picker">
+          <div class="picker-band"></div>
+          <div class="wheel" data-unit="h" data-max="23" data-label="hours"></div>
+          <div class="wheel" data-unit="m" data-max="59" data-label="min"></div>
+          <div class="wheel" data-unit="s" data-max="59" data-label="sec"></div>
         </div>
-      </header>
 
-      <div class="display-well">
-        <div class="display" id="display"><!-- built by JS --></div>
-      </div>
+        <!-- Running / paused: flip cards inside the ring -->
+        <div class="dial" id="dial" hidden>
+          <svg class="ring" viewBox="0 0 200 200" aria-hidden="true">
+            <circle class="track" cx="100" cy="100" r="96" />
+            <circle class="prog" id="ringProg" cx="100" cy="100" r="96" />
+          </svg>
+          <div class="dial-inner">
+            <div class="dial-label" id="dialLabel"></div>
+            <div class="display" id="display"></div>
+            <div class="dial-end" id="dialEnd">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22Zm7-6v-5a7 7 0 0 0-5.5-6.84V3.5a1.5 1.5 0 0 0-3 0v.66A7 7 0 0 0 5 11v5l-2 2v1h18v-1l-2-2Z"/></svg>
+              <span id="endTime"></span>
+            </div>
+          </div>
+        </div>
+      </section>
 
-      <div class="plate-row">
-        <span class="plate">MODEL TM-1997</span>
-        <span class="plate serial" id="statusText">STANDBY</span>
-        <span class="plate">SER. 00-0451-D</span>
-      </div>
-    </section>
+      <section class="controls">
+        <button class="round cancel" id="btnCancel" disabled><span>Cancel</span></button>
+        <button class="round start" id="btnStart"><span>Start</span></button>
+      </section>
+    </div>
 
-    <section class="console">
-      <div class="console-group main-keys">
-        <button class="key primary" id="btnStart" title="Start / Pause (Space)"><span>START</span></button>
-        <button class="key" id="btnReset" title="Reset (R)"><span>RESET</span></button>
-        <button class="key" id="btnSet" title="Set time with wheels (T)"><span>SET TIME</span></button>
-      </div>
-
-      <div class="console-group presets" id="presets">
-        <button class="key small" data-preset="60">1 MIN</button>
-        <button class="key small" data-preset="300">5 MIN</button>
-        <button class="key small" data-preset="1500">25 MIN</button>
-        <button class="key small" data-preset="3600">1 HR</button>
-      </div>
-
-      <div class="console-group fader-group">
-        <label class="fader" title="Click volume">
-          <span>CLICK</span>
-          <input type="range" id="volClickMain" min="0" max="100" value="85" aria-label="Click volume" />
+    <div class="col-side">
+      <section class="group">
+        <label class="cell">
+          <span>Label</span>
+          <input type="text" id="label" placeholder="Timer" maxlength="28" autocomplete="off" enterkeyhint="done" />
         </label>
-      </div>
+        <label class="cell">
+          <span>When Timer Ends</span>
+          <select id="endSound">
+            <option value="rattle">Flap Rattle</option>
+            <option value="once">Single Rattle</option>
+            <option value="silent">Silent</option>
+          </select>
+        </label>
+      </section>
 
-      <div class="console-group">
-        <button class="key small icon" id="btnMute" title="Mute (M)">SND</button>
-        <button class="key small icon" id="btnFull" title="Fullscreen (F)">FULL</button>
-        <button class="key small icon" id="btnSettings" title="Settings (S)">SETUP</button>
-      </div>
-    </section>
+      <h2 class="group-title">Sound</h2>
+      <section class="group">
+        <div class="cell slider-cell">
+          <span>Click Volume</span>
+          <div class="slider-row">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z"/></svg>
+            <input type="range" id="volClick" min="0" max="100" value="85" aria-label="Click volume" />
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </div>
+        </div>
+        <div class="cell slider-cell">
+          <span>Echo</span>
+          <div class="slider-row">
+            <input type="range" id="echo" min="0" max="100" value="55" aria-label="Echo" />
+          </div>
+        </div>
+        <label class="cell" id="silentRow" hidden>
+          <span>Play When Silent Mode Is On</span>
+          <input type="checkbox" class="switch" id="optSilent" />
+        </label>
+        <label class="cell tappable">
+          <span>Custom Click Sound</span>
+          <span class="value" id="tickNote">Built-in</span>
+          <input type="file" id="tickFile" accept="audio/*" hidden />
+        </label>
+        <button class="cell link" id="tickClear" hidden>Use Built-in Click</button>
+      </section>
 
-    <p class="hint" id="hint">Tap the clock for wheels, or slide a column up and down to set it<span class="keys"> · <kbd>Space</kbd> start/pause · <kbd>R</kbd> reset · <kbd>F</kbd> fullscreen</span></p>
+      <h2 class="group-title">Recents</h2>
+      <section class="group" id="recents"></section>
+
+      <h2 class="group-title">Wallpaper</h2>
+      <section class="group">
+        <div class="cell swatch-cell"><div class="swatches" id="swatches"></div></div>
+        <label class="cell tappable">
+          <span class="blue">Choose Photo…</span>
+          <input type="file" id="wallFile" accept="image/*" hidden />
+        </label>
+        <div class="cell slider-cell">
+          <span>Dim</span>
+          <div class="slider-row"><input type="range" id="wallDimRange" min="0" max="90" value="0" aria-label="Dim wallpaper" /></div>
+        </div>
+        <div class="cell slider-cell">
+          <span>Blur</span>
+          <div class="slider-row"><input type="range" id="wallBlur" min="0" max="30" value="0" aria-label="Blur wallpaper" /></div>
+        </div>
+      </section>
+
+      <p class="foot">Space to start or pause · Esc to cancel</p>
+    </div>
   </main>
 
-  <!-- Wheel picker (set the time like a phone timer) -->
-  <div class="sheet-backdrop" id="sheetBackdrop"></div>
-  <section class="sheet" id="sheet" aria-hidden="true" aria-label="Set time">
-    <div class="sheet-grip"></div>
-    <div class="wheels" id="wheels">
-      <div class="wheel" data-unit="h" data-max="99" data-label="hours"></div>
-      <div class="wheel" data-unit="m" data-max="59" data-label="min"></div>
-      <div class="wheel" data-unit="s" data-max="59" data-label="sec"></div>
-      <div class="wheel-band"></div>
+  <!-- Timer done -->
+  <div class="alert" id="alert" hidden>
+    <div class="alert-card" role="alertdialog" aria-labelledby="alertBig">
+      <div class="alert-title" id="alertTitle">Timer</div>
+      <div class="alert-big" id="alertBig">Timer Done</div>
+      <div class="alert-actions">
+        <button id="alertStop" class="stop">Stop</button>
+        <button id="alertRepeat">Repeat</button>
+      </div>
     </div>
-    <div class="sheet-actions">
-      <button class="key small" id="pickCancel">CANCEL</button>
-      <button class="key small" id="pickSet">SET</button>
-      <button class="key primary" id="pickStart"><span>START</span></button>
-    </div>
-  </section>
-
-  <!-- Settings drawer -->
-  <aside class="drawer" id="drawer" aria-hidden="true">
-    <div class="drawer-inner">
-      <header class="drawer-head">
-        <h2>Setup</h2>
-        <button class="key small" id="btnCloseSettings">CLOSE</button>
-      </header>
-
-      <fieldset>
-        <legend>Mode</legend>
-        <div class="seg" id="modeSeg">
-          <button data-mode="timer" class="on">Timer</button>
-          <button data-mode="date">Countdown to date</button>
-        </div>
-        <label class="row" id="dateRow" hidden>
-          <span>Target</span>
-          <input type="datetime-local" id="targetDate" />
-        </label>
-      </fieldset>
-
-      <fieldset>
-        <legend>Wallpaper</legend>
-        <div class="swatches" id="swatches"></div>
-        <div class="row gap">
-          <label class="key small file-btn">UPLOAD IMAGE
-            <input type="file" id="wallFile" accept="image/*" hidden />
-          </label>
-          <input type="url" id="wallUrl" placeholder="…or paste an image URL" />
-        </div>
-        <label class="row"><span>Darken</span><input type="range" id="wallDim" min="0" max="90" value="45" /></label>
-        <label class="row"><span>Blur</span><input type="range" id="wallBlur" min="0" max="20" value="0" /></label>
-      </fieldset>
-
-      <fieldset>
-        <legend>Glow</legend>
-        <div class="seg" id="accentSeg">
-          <button data-accent="doom" class="on">Doom green</button>
-          <button data-accent="amber">Amber</button>
-          <button data-accent="blood">Blood red</button>
-          <button data-accent="ice">Ice</button>
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Sound</legend>
-        <label class="row"><span>Master</span><input type="range" id="volMaster" min="0" max="100" value="80" /></label>
-        <label class="row"><span>Flap clack</span><input type="range" id="volClick" min="0" max="100" value="85" /></label>
-        <label class="row"><span>Echo</span><input type="range" id="echo" min="0" max="100" value="55" /></label>
-        <label class="row check" id="silentRow" hidden><input type="checkbox" id="optSilent" /> <span>Play clicks even when iPhone is on silent</span></label>
-        <div class="row gap">
-          <label class="key small file-btn">CUSTOM CLACK SOUND
-            <input type="file" id="tickFile" accept="audio/*" hidden />
-          </label>
-          <button class="key small" id="tickClear">USE BUILT-IN</button>
-        </div>
-        <p class="note" id="tickNote">Using the built-in synthesized flap.</p>
-      </fieldset>
-
-      <fieldset>
-        <legend>Display</legend>
-        <label class="row check"><input type="checkbox" id="optShake" checked /> <span>Shake &amp; flash at zero</span></label>
-        <label class="row check"><input type="checkbox" id="optCrt" checked /> <span>CRT scanlines &amp; film grain</span></label>
-      </fieldset>
-    </div>
-  </aside>
+  </div>
 
   <script src="app.js"></script>
 </body>

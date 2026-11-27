@@ -1,7 +1,7 @@
 /* Offline support: the app shell is cached on install, then served from
    cache and refreshed in the background (changes show up on next launch).
    Bump VERSION whenever you ship changes. */
-const VERSION = 'tminus-v2';
+const VERSION = 'fliptimer-v3';
 const SHELL = [
   './',
   'index.html',
