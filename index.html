@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>T-MINUS · Split-Flap Countdown</title>
   <meta name="theme-color" content="#0b0d0a" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" type="image/png" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+  <meta name="apple-mobile-web-app-title" content="T-MINUS" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;700&family=Special+Elite&family=VT323&display=swap" rel="stylesheet" />
@@ -45,9 +52,10 @@
     </section>
 
     <section class="console">
-      <div class="console-group">
+      <div class="console-group main-keys">
         <button class="key primary" id="btnStart" title="Start / Pause (Space)"><span>START</span></button>
         <button class="key" id="btnReset" title="Reset (R)"><span>RESET</span></button>
+        <button class="key" id="btnSet" title="Set time with wheels (T)"><span>SET TIME</span></button>
       </div>
 
       <div class="console-group presets" id="presets">
@@ -57,6 +65,13 @@
         <button class="key small" data-preset="3600">1 HR</button>
       </div>
 
+      <div class="console-group fader-group">
+        <label class="fader" title="Click volume">
+          <span>CLICK</span>
+          <input type="range" id="volClickMain" min="0" max="100" value="85" aria-label="Click volume" />
+        </label>
+      </div>
+
       <div class="console-group">
         <button class="key small icon" id="btnMute" title="Mute (M)">SND</button>
         <button class="key small icon" id="btnFull" title="Fullscreen (F)">FULL</button>
@@ -64,8 +79,25 @@
       </div>
     </section>
 
-    <p class="hint" id="hint">Use ▲ ▼ or scroll on a column to set the time<span class="keys"> · <kbd>Space</kbd> start/pause · <kbd>R</kbd> reset · <kbd>F</kbd> fullscreen</span></p>
+    <p class="hint" id="hint">Tap the clock for wheels, or slide a column up and down to set it<span class="keys"> · <kbd>Space</kbd> start/pause · <kbd>R</kbd> reset · <kbd>F</kbd> fullscreen</span></p>
   </main>
+
+  <!-- Wheel picker (set the time like a phone timer) -->
+  <div class="sheet-backdrop" id="sheetBackdrop"></div>
+  <section class="sheet" id="sheet" aria-hidden="true" aria-label="Set time">
+    <div class="sheet-grip"></div>
+    <div class="wheels" id="wheels">
+      <div class="wheel" data-unit="h" data-max="99" data-label="hours"></div>
+      <div class="wheel" data-unit="m" data-max="59" data-label="min"></div>
+      <div class="wheel" data-unit="s" data-max="59" data-label="sec"></div>
+      <div class="wheel-band"></div>
+    </div>
+    <div class="sheet-actions">
+      <button class="key small" id="pickCancel">CANCEL</button>
+      <button class="key small" id="pickSet">SET</button>
+      <button class="key primary" id="pickStart"><span>START</span></button>
+    </div>
+  </section>
 
   <!-- Settings drawer -->
   <aside class="drawer" id="drawer" aria-hidden="true">
@@ -114,9 +146,8 @@
         <legend>Sound</legend>
         <label class="row"><span>Master</span><input type="range" id="volMaster" min="0" max="100" value="80" /></label>
         <label class="row"><span>Flap clack</span><input type="range" id="volClick" min="0" max="100" value="85" /></label>
-        <label class="row"><span>Dread drone</span><input type="range" id="volDrone" min="0" max="100" value="45" /></label>
-        <label class="row check"><input type="checkbox" id="optMinuteBoom" checked /> <span>Deep boom every minute</span></label>
-        <label class="row check"><input type="checkbox" id="optHeartbeat" checked /> <span>Heartbeat in the final 10 seconds</span></label>
+        <label class="row"><span>Echo</span><input type="range" id="echo" min="0" max="100" value="55" /></label>
+        <label class="row check" id="silentRow" hidden><input type="checkbox" id="optSilent" /> <span>Play clicks even when iPhone is on silent</span></label>
         <div class="row gap">
           <label class="key small file-btn">CUSTOM CLACK SOUND
             <input type="file" id="tickFile" accept="audio/*" hidden />

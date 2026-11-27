@@ -26,9 +26,8 @@
     accent: 'doom',
     volMaster: 80,
     volClick: 85,
-    volDrone: 45,
-    minuteBoom: true,
-    heartbeat: true,
+    echo: 55,
+    ignoreSilent: false,
     shake: true,
     crt: true,
     muted: false,
@@ -70,9 +69,8 @@
      Sound engine (all synthesized)
      --------------------------------------------------------- */
   const Snd = (() => {
-    let ctx = null, master, clickBus, droneBus, fxBus, verbSend, noise;
+    let ctx = null, master, clickBus, verbSend, echoSend, noise;
     let customBuf = null, pendingCustom = null;
-    let drone = null;
     const recent = [];
 
     function makeIR(seconds, decay) {
@@ -89,6 +87,7 @@
       if (ctx) { if (ctx.state === 'suspended') ctx.resume(); return; }
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
+      applySession();
       ctx = new AC();
 
       const comp = ctx.createDynamicsCompressor();
@@ -96,16 +95,24 @@
       master = ctx.createGain();
       master.connect(comp).connect(ctx.destination);
 
-      // A big empty concrete room
-      const verb = ctx.createConvolver();
-      verb.buffer = makeIR(3.2, 2.6);
-      verbSend = ctx.createGain(); verbSend.gain.value = 0.32;
-      verbSend.connect(verb).connect(master);
+      clickBus = ctx.createGain();
+      clickBus.connect(master);
 
-      clickBus = ctx.createGain(); clickBus.connect(master);
-      const clickVerb = ctx.createGain(); clickVerb.gain.value = 0.35; clickBus.connect(clickVerb).connect(verbSend);
-      droneBus = ctx.createGain(); droneBus.connect(master);
-      fxBus = ctx.createGain(); fxBus.connect(master); fxBus.connect(verbSend);
+      // Room: a concrete space the clack rings out in
+      const verb = ctx.createConvolver();
+      verb.buffer = makeIR(2.4, 3);
+      verbSend = ctx.createGain();
+      clickBus.connect(verbSend).connect(verb).connect(master);
+
+      // Echo: a soft slapback off the far wall, darker on every repeat
+      const delay = ctx.createDelay(1);
+      delay.delayTime.value = 0.13;
+      const fb = ctx.createGain(); fb.gain.value = 0.28;
+      const tone = ctx.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 2600;
+      echoSend = ctx.createGain();
+      clickBus.connect(echoSend).connect(delay);
+      delay.connect(tone).connect(fb).connect(delay);
+      tone.connect(master);
 
       noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
       const nd = noise.getChannelData(0);
@@ -115,13 +122,20 @@
       if (pendingCustom) { const p = pendingCustom; pendingCustom = null; loadCustom(p); }
     }
 
+    // iPhone: let the clicks play even with the silent switch on, if asked to
+    function applySession() {
+      try { if (navigator.audioSession) navigator.audioSession.type = S.ignoreSilent ? 'playback' : 'auto'; } catch {}
+    }
+
     function applyVolumes() {
+      applySession();
       if (!ctx) return;
       const t = ctx.currentTime;
+      const e = S.echo / 100;
       master.gain.setTargetAtTime(S.muted ? 0 : (S.volMaster / 100), t, 0.05);
       clickBus.gain.setTargetAtTime(S.volClick / 100, t, 0.05);
-      droneBus.gain.setTargetAtTime((S.volDrone / 100) * 0.5, t, 0.2);
-      fxBus.gain.setTargetAtTime(0.9, t, 0.05);
+      verbSend.gain.setTargetAtTime(e * 0.9, t, 0.05);
+      echoSend.gain.setTargetAtTime(e * 0.45, t, 0.05);
     }
 
     function env(g, t, peak, attack, release) {
@@ -130,14 +144,14 @@
       g.gain.exponentialRampToValueAtTime(0.0001, t + attack + release);
     }
 
-    function burst(t, { type = 'bandpass', f, q = 1, dur, gain, dest }) {
+    function burst(t, { type = 'bandpass', f, q = 1, dur, gain }) {
       const s = ctx.createBufferSource();
       s.buffer = noise;
       const fl = ctx.createBiquadFilter(); fl.type = type; fl.frequency.value = f; fl.Q.value = q;
       const g = ctx.createGain();
       g.gain.setValueAtTime(gain, t);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-      s.connect(fl).connect(g).connect(dest || clickBus);
+      s.connect(fl).connect(g).connect(clickBus);
       s.start(t, Math.random() * 1.8, dur + 0.05);
     }
 
@@ -178,138 +192,6 @@
       o.start(t2); o.stop(t2 + 0.12);
     }
 
-    // Deep cinematic impact (every minute)
-    function boom(strength = 1) {
-      if (!ctx || ctx.state !== 'running') return;
-      const t = ctx.currentTime + 0.02;
-      const o = ctx.createOscillator(); o.type = 'sine';
-      o.frequency.setValueAtTime(68, t);
-      o.frequency.exponentialRampToValueAtTime(24, t + 1.8);
-      const g = ctx.createGain(); env(g, t, 0.9 * strength, 0.015, 2.6);
-      o.connect(g).connect(fxBus); o.start(t); o.stop(t + 3);
-
-      const sub = ctx.createOscillator(); sub.type = 'sine'; sub.frequency.value = 32;
-      const sg = ctx.createGain(); env(sg, t, 0.5 * strength, 0.05, 3);
-      sub.connect(sg).connect(fxBus); sub.start(t); sub.stop(t + 3.2);
-
-      burst(t, { type: 'lowpass', f: 180, q: 0.7, dur: 1.4, gain: 0.7 * strength, dest: fxBus });
-      // huge steel door resonance
-      burst(t + 0.01, { f: 410, q: 16, dur: 1.6, gain: 0.5 * strength, dest: fxBus });
-      burst(t + 0.01, { f: 1130, q: 22, dur: 0.9, gain: 0.25 * strength, dest: fxBus });
-    }
-
-    // Lub-dub for the final seconds
-    function heartbeat() {
-      if (!ctx || ctx.state !== 'running') return;
-      const beat = (t, amp) => {
-        const o = ctx.createOscillator(); o.type = 'sine';
-        o.frequency.setValueAtTime(62, t); o.frequency.exponentialRampToValueAtTime(38, t + 0.16);
-        const g = ctx.createGain(); env(g, t, amp, 0.008, 0.2);
-        o.connect(g).connect(fxBus); o.start(t); o.stop(t + 0.3);
-        burst(t, { type: 'lowpass', f: 120, dur: 0.12, gain: amp * 0.5, dest: fxBus });
-      };
-      const t = ctx.currentTime + 0.03;
-      beat(t, 0.75); beat(t + 0.26, 0.5);
-    }
-
-    let shaper;
-    function distortion() {
-      if (shaper) return shaper;
-      shaper = ctx.createWaveShaper();
-      const n = 1024, curve = new Float32Array(n), k = 18;
-      for (let i = 0; i < n; i++) { const x = (i / n) * 2 - 1; curve[i] = ((1 + k) * x) / (1 + k * Math.abs(x)); }
-      shaper.curve = curve; shaper.oversample = '2x';
-      const post = ctx.createGain(); post.gain.value = 0.28;
-      shaper.connect(post).connect(fxBus);
-      return shaper;
-    }
-
-    // Ominous low brass cluster
-    function stab(t, len = 1) {
-      const freqs = [43.65, 65.41, 87.31, 103.83, 130.81];
-      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 4;
-      lp.frequency.setValueAtTime(120, t);
-      lp.frequency.exponentialRampToValueAtTime(1900, t + 0.12);
-      lp.frequency.exponentialRampToValueAtTime(260, t + 1.1 * len);
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.5, t + 0.05);
-      g.gain.setTargetAtTime(0.0001, t + 0.5 * len, 0.35 * len);
-      lp.connect(g).connect(distortion());
-      freqs.forEach((f) => {
-        [-7, 7].forEach((cents) => {
-          const o = ctx.createOscillator(); o.type = 'sawtooth';
-          o.frequency.value = f; o.detune.value = cents + (Math.random() * 4 - 2);
-          o.connect(lp); o.start(t); o.stop(t + 2.8 * len);
-        });
-      });
-    }
-
-    // Zero: the whole thing
-    function doom() {
-      if (!ctx || ctx.state !== 'running') return;
-      const t0 = ctx.currentTime + 0.05;
-      boom(1.3);
-      stab(t0, 1);
-      stab(t0 + 1.3, 1);
-      stab(t0 + 2.6, 1.8);
-      setTimeout(() => boom(1.1), 2600);
-    }
-
-    function startDrone() {
-      if (!ctx || drone) return;
-      const t = ctx.currentTime;
-      const out = ctx.createGain(); out.gain.value = 0.0001; out.connect(droneBus);
-      out.gain.exponentialRampToValueAtTime(1, t + 3.5);
-
-      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 200; lp.Q.value = 7;
-      lp.connect(out);
-      const lfo = ctx.createOscillator(); lfo.frequency.value = 0.055;
-      const lfoAmt = ctx.createGain(); lfoAmt.gain.value = 110;
-      lfo.connect(lfoAmt).connect(lp.frequency);
-
-      const nodes = [lfo];
-      const voice = (type, f, gain, detune = 0) => {
-        const o = ctx.createOscillator(); o.type = type; o.frequency.value = f; o.detune.value = detune;
-        const g = ctx.createGain(); g.gain.value = gain;
-        o.connect(g).connect(lp); nodes.push(o);
-      };
-      voice('sawtooth', 36.71, 0.35, -6);
-      voice('sawtooth', 36.71, 0.35, 7);
-      voice('sawtooth', 55.0, 0.18, 3);
-      voice('triangle', 77.78, 0.08);        // the tritone: unease
-      const sub = ctx.createOscillator(); sub.type = 'sine'; sub.frequency.value = 18.35;
-      const sg = ctx.createGain(); sg.gain.value = 0.6; sub.connect(sg).connect(out); nodes.push(sub);
-
-      // wind through the bunker
-      const wind = ctx.createBufferSource(); wind.buffer = noise; wind.loop = true;
-      const wf = ctx.createBiquadFilter(); wf.type = 'bandpass'; wf.frequency.value = 380; wf.Q.value = 0.6;
-      const wg = ctx.createGain(); wg.gain.value = 0.06;
-      const wl = ctx.createOscillator(); wl.frequency.value = 0.09;
-      const wla = ctx.createGain(); wla.gain.value = 160;
-      wl.connect(wla).connect(wf.frequency);
-      wind.connect(wf).connect(wg).connect(out);
-      nodes.push(wind, wl);
-
-      nodes.forEach((n) => n.start(t));
-      drone = { out, lp, nodes };
-    }
-
-    function droneTension(x) { // 0..1
-      if (!drone) return;
-      drone.lp.frequency.setTargetAtTime(200 + x * 520, ctx.currentTime, 1.2);
-    }
-
-    function stopDrone(fade = 1.6) {
-      if (!drone) return;
-      const d = drone; drone = null;
-      const t = ctx.currentTime;
-      d.out.gain.cancelScheduledValues(t);
-      d.out.gain.setValueAtTime(Math.max(d.out.gain.value, 0.0001), t);
-      d.out.gain.exponentialRampToValueAtTime(0.0001, t + fade);
-      d.nodes.forEach((n) => { try { n.stop(t + fade + 0.1); } catch {} });
-    }
-
     async function loadCustom(arrayBuffer) {
       if (!arrayBuffer) { customBuf = null; return true; }
       if (!ctx) { pendingCustom = arrayBuffer; return true; }
@@ -318,7 +200,7 @@
     }
 
     return {
-      init, click, boom, heartbeat, doom, startDrone, stopDrone, droneTension, applyVolumes, loadCustom,
+      init, click, applyVolumes, loadCustom,
       get ready() { return !!ctx && ctx.state === 'running'; },
     };
   })();
@@ -486,6 +368,7 @@
       groups.push({ ...g, flaps });
 
       if (g.step) {
+        bindSlide(wrap, g.step);
         bindRepeat(up, () => nudge(g.step));
         bindRepeat(down, () => nudge(-g.step));
         wrap.addEventListener('wheel', (e) => {
@@ -516,6 +399,39 @@
     return parts;
   }
 
+  // Drag a column up/down to roll it; a plain tap opens the wheels
+  function bindSlide(wrap, step) {
+    let y0 = null, applied = 0, moved = false, id = null;
+    wrap.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.nudge') || e.button > 0) return;
+      if (S.mode !== 'timer' || state.status === 'running') return;
+      Snd.init();
+      y0 = e.clientY; applied = 0; moved = false; id = e.pointerId;
+      try { wrap.setPointerCapture(id); } catch {}
+    });
+    wrap.addEventListener('pointermove', (e) => {
+      if (y0 === null || e.pointerId !== id) return;
+      const dy = y0 - e.clientY;
+      if (!moved && Math.abs(dy) > 6) { moved = true; wrap.classList.add('dragging'); }
+      const steps = Math.trunc(dy / 22);
+      if (steps !== applied) { nudge((steps - applied) * step); applied = steps; }
+    });
+    let tapped = false;
+    const end = (e) => {
+      if (y0 === null || e.pointerId !== id) return;
+      y0 = null;
+      wrap.classList.toggle('dragging', false);
+      tapped = !moved && e.type === 'pointerup';
+    };
+    wrap.addEventListener('pointerup', end);
+    wrap.addEventListener('pointercancel', end);
+    // open on click (not pointerup) so the same tap can't land on the new backdrop
+    wrap.addEventListener('click', (e) => {
+      if (tapped && !e.target.closest('.nudge')) picker.open();
+      tapped = false;
+    });
+  }
+
   function bindRepeat(btn, fn) {
     let t1, t2;
     const stop = () => { clearTimeout(t1); clearInterval(t2); };
@@ -526,6 +442,97 @@
       t1 = setTimeout(() => { t2 = setInterval(fn, 110); }, 420);
     });
     ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => btn.addEventListener(ev, stop));
+  }
+
+  /* ---------------------------------------------------------
+     Wheel picker: scroll drums like a phone timer.
+     Each detent you roll past clicks like a flap.
+     --------------------------------------------------------- */
+  class Wheel {
+    constructor(el) {
+      this.el = el;
+      this.unit = el.dataset.unit;
+      this.max = +el.dataset.max;
+      this.value = 0;
+      this.silent = true;
+      const items = Array.from({ length: this.max + 1 }, (_, i) => `<div class="wheel-item" data-i="${i}">${i}</div>`).join('');
+      el.innerHTML = `<div class="wheel-scroll"><div class="wheel-pad"></div>${items}<div class="wheel-pad"></div></div><span class="wheel-unit">${el.dataset.label}</span>`;
+      this.sc = $('.wheel-scroll', el);
+      this.items = $$('.wheel-item', el);
+      this.sc.addEventListener('scroll', () => {
+        if (!this.raf) this.raf = requestAnimationFrame(() => { this.raf = 0; this.paint(); });
+      }, { passive: true });
+      this.sc.addEventListener('click', (e) => {
+        const it = e.target.closest('.wheel-item');
+        if (it) this.sc.scrollTo({ top: +it.dataset.i * this.ih(), behavior: 'smooth' });
+      });
+    }
+    ih() { return this.items[0].offsetHeight || 46; }
+    paint() {
+      const c = this.sc.scrollTop / this.ih();
+      const idx = clamp(Math.round(c), 0, this.max);
+      if (idx !== this.value) { this.value = idx; if (!this.silent) Snd.click(0.4); }
+      const lo = Math.max(0, Math.floor(c) - 4), hi = Math.min(this.max, Math.ceil(c) + 4);
+      if (this.lo !== undefined) {
+        for (let i = this.lo; i <= this.hi; i++) {
+          if (i >= lo && i <= hi) continue;
+          const it = this.items[i];
+          it.style.transform = ''; it.style.opacity = ''; it.classList.toggle('sel', false);
+        }
+      }
+      for (let i = lo; i <= hi; i++) {
+        const d = i - c, it = this.items[i];
+        it.style.transform = `perspective(380px) rotateX(${(-d * 21).toFixed(1)}deg)`;
+        it.style.opacity = Math.max(0.12, 1 - Math.abs(d) * 0.3).toFixed(2);
+        it.classList.toggle('sel', i === idx);
+      }
+      this.lo = lo; this.hi = hi;
+    }
+    set(v) {
+      this.silent = true;
+      this.value = v;
+      this.sc.scrollTop = v * this.ih();
+      this.paint();
+      setTimeout(() => { this.silent = false; }, 60);
+    }
+  }
+
+  let picker = { open() {}, close() {}, isOpen: false };
+  function buildPicker() {
+    const sheet = $('#sheet'), back = $('#sheetBackdrop');
+    const wheels = $$('#wheels .wheel').map((el) => new Wheel(el));
+    const total = () => {
+      const v = {};
+      wheels.forEach((w) => { v[w.unit] = w.value; });
+      return v.h * 3600 + v.m * 60 + v.s;
+    };
+    const p = {
+      isOpen: false,
+      open() {
+        if (state.status === 'running') { flashStatus('PAUSE TO SET'); return; }
+        if (S.mode !== 'timer') setMode('timer');
+        Snd.init();
+        closeDrawer();
+        sheet.classList.add('open'); back.classList.add('open');
+        sheet.setAttribute('aria-hidden', 'false');
+        p.isOpen = true;
+        const t = Math.ceil(state.remainingMs / 1000);
+        const v = { h: Math.floor(t / 3600), m: Math.floor((t % 3600) / 60), s: t % 60 };
+        requestAnimationFrame(() => wheels.forEach((w) => w.set(v[w.unit])));
+      },
+      close() {
+        sheet.classList.toggle('open', false); back.classList.toggle('open', false);
+        sheet.setAttribute('aria-hidden', 'true');
+        p.isOpen = false;
+        wheels.forEach((w) => { w.silent = true; });
+      },
+    };
+    back.addEventListener('click', p.close);
+    $('#pickCancel').addEventListener('click', p.close);
+    $('#pickSet').addEventListener('click', () => { setDuration(total()); p.close(); });
+    $('#pickStart').addEventListener('click', () => { setDuration(total()); p.close(); start(); });
+    $('#btnSet').addEventListener('click', () => p.open());
+    return p;
   }
 
   /* ---------------------------------------------------------
@@ -589,7 +596,7 @@
     }
     state.status = 'running';
     state.startedSec = Math.ceil((state.endAt - Date.now()) / 1000);
-    Snd.startDrone();
+    keepAwake(true);
     saveState();
     refresh();
   }
@@ -618,24 +625,40 @@
     state.remainingMs = 0;
     render(0);
     saveState();
-    Snd.stopDrone(5);
+    keepAwake(false);
     if (!silent) {
-      Snd.doom();
+      try { navigator.vibrate?.([400, 120, 400, 120, 800]); } catch {}
       if (S.shake) {
         const stage = $('#stage');
         stage.classList.remove('shake'); void stage.offsetWidth; stage.classList.add('shake');
         const fl = $('#flash');
         fl.classList.remove('go'); void fl.offsetWidth; fl.classList.add('go');
       }
-      // the board shudders through a full revolution and settles back on zero
-      setTimeout(() => {
-        groups.forEach((g, gi) => g.flaps.forEach((f, i) => setTimeout(() => f.spin(), (gi * 2 + i) * 90)));
-      }, 2900);
+      // The alarm is the board itself: every card clatters through a full
+      // revolution, twice, and settles back on zero.
+      const rattle = (delay) => setTimeout(() => {
+        groups.forEach((g, gi) => g.flaps.forEach((f, i) => setTimeout(() => f.spin(), (gi * 2 + i) * 70)));
+      }, delay);
+      rattle(350);
+      rattle(2300);
     }
     refresh();
   }
 
-  function stopAudio() { Snd.stopDrone(); }
+  function stopAudio() { keepAwake(false); }
+
+  // Keep the phone screen on while the timer runs
+  let wakeLock = null;
+  async function keepAwake(on) {
+    try {
+      if (on && !wakeLock && navigator.wakeLock && !document.hidden) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      } else if (!on && wakeLock) {
+        const w = wakeLock; wakeLock = null; await w.release();
+      }
+    } catch { wakeLock = null; }
+  }
 
   function toggle() {
     if (state.status === 'running') pause();
@@ -654,7 +677,6 @@
   }
 
   function onSecond(sec) {
-    const prev = state.lastSec;
     state.lastSec = sec;
     const parts = render(sec);
     updateTitle(parts);
@@ -664,9 +686,6 @@
     $('#lampCrit').classList.toggle('on', critical);
     $('#lampCrit').classList.toggle('blink', critical);
 
-    Snd.droneTension(critical ? 1 : sec <= 60 ? 0.45 : 0);
-    if (critical && S.heartbeat) Snd.heartbeat();
-    else if (S.minuteBoom && sec % 60 === 0 && prev !== null && sec !== state.startedSec) Snd.boom(0.8);
 
     $('#statusText').textContent = critical ? 'CRITICAL' : 'T-MINUS · LIVE';
   }
@@ -864,7 +883,7 @@
 
   function wire() {
     // unlock audio on first gesture anywhere
-    const unlock = () => { Snd.init(); if (state.status === 'running') Snd.startDrone(); };
+    const unlock = () => { Snd.init(); if (state.status === 'running') keepAwake(true); };
     window.addEventListener('pointerdown', unlock, { once: true });
     window.addEventListener('keydown', unlock, { once: true });
 
@@ -942,19 +961,27 @@
     });
 
     // Sound
-    [['volMaster', 'volMaster'], ['volClick', 'volClick'], ['volDrone', 'volDrone']].forEach(([id, k]) => {
+    // Volume + echo sliders (the console fader and the Setup slider stay in sync)
+    const sliders = [['volMaster', 'volMaster'], ['volClick', 'volClick'], ['volClickMain', 'volClick'], ['echo', 'echo']];
+    sliders.forEach(([id, k]) => {
       const el = $('#' + id);
       el.value = S[k];
-      el.addEventListener('input', () => { S[k] = +el.value; saveSettings(); Snd.applyVolumes(); });
+      el.addEventListener('input', () => {
+        S[k] = +el.value;
+        sliders.forEach(([id2, k2]) => { if (k2 === k && id2 !== id) $('#' + id2).value = S[k]; });
+        saveSettings(); Snd.applyVolumes();
+      });
+      el.addEventListener('change', () => { Snd.init(); Snd.click(1); });
     });
-    $('#volClick').addEventListener('change', () => { Snd.init(); Snd.click(1); });
 
-    [['optMinuteBoom', 'minuteBoom'], ['optHeartbeat', 'heartbeat'], ['optShake', 'shake'], ['optCrt', 'crt']].forEach(([id, k]) => {
+    $('#silentRow').hidden = !('audioSession' in navigator);
+    [['optShake', 'shake'], ['optCrt', 'crt'], ['optSilent', 'ignoreSilent']].forEach(([id, k]) => {
       const el = $('#' + id);
       el.checked = !!S[k];
       el.addEventListener('change', () => {
         S[k] = el.checked; saveSettings();
         document.body.classList.toggle('no-crt', !S.crt);
+        Snd.applyVolumes();
       });
     });
 
@@ -984,18 +1011,28 @@
       if (e.target.closest('input, [contenteditable="true"]')) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const k = e.key.toLowerCase();
+      if (picker.isOpen) {
+        if (k === 'escape') picker.close();
+        else if (k === 'enter') $('#pickSet').click();
+        return;
+      }
       if (k === ' ') { e.preventDefault(); pressKey('#btnStart'); toggle(); }
       else if (k === 'r') { pressKey('#btnReset'); reset(); }
       else if (k === 'm') { pressKey('#btnMute'); $('#btnMute').click(); }
       else if (k === 'f') { pressKey('#btnFull'); toggleFull(); }
       else if (k === 's') { drawer.classList.contains('open') ? closeDrawer() : openDrawer(); }
+      else if (k === 't') picker.open();
       else if (k === 'escape') closeDrawer();
       else if (k === 'arrowup' && S.mode === 'timer') nudge(60);
       else if (k === 'arrowdown' && S.mode === 'timer') nudge(-60);
     });
 
     // When returning to a hidden tab, flaps catch up instantly instead of replaying
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      tick();
+      if (state.status === 'running') keepAwake(true);
+    });
   }
 
   function pressKey(sel) {
@@ -1021,6 +1058,7 @@
     $('#presets').style.display = S.mode === 'date' ? 'none' : '';
     syncMuteBtn();
 
+    picker = buildPicker();
     buildDisplay(S.mode);
     wire();
     await applyWallpaper();
@@ -1055,6 +1093,13 @@
     // Startup: the board spins up from zero to the set time
     setTimeout(() => { refresh(true); }, 350);
     setInterval(tick, 100);
+
+    // Installable phone app: cache everything so it runs offline
+    try {
+      if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+        navigator.serviceWorker.register('sw.js').catch(() => {});
+      }
+    } catch {}
   }
 
   boot();
